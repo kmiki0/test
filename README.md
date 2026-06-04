@@ -44,6 +44,23 @@ WebAuthn は **`localhost` か HTTPS** でのみ動作します。`npm run dev` 
 `http://localhost:5173` ならそのまま指紋／顔認証（Touch ID / Face ID / Windows Hello）や
 セキュリティキーで試せます。公開する場合は HTTPS で配信してください。
 
+## デプロイ（Cloudflare Pages）
+
+Private リポジトリでも無料で公開でき、`https://<名前>.pages.dev` の HTTPS URL が得られます
+（パスキーの動作要件を満たします）。ローカルに Node が無くても Cloudflare 側でビルドされます。
+
+1. [Cloudflare](https://dash.cloudflare.com/) に無料登録 → **Workers & Pages** → **Create** → **Pages** → **Connect to Git**
+2. GitHub を認可し、`kmiki0/test` を選択
+3. ビルド設定:
+   - Framework preset: **Vite**
+   - Build command: **`npm run build`**
+   - Build output directory: **`dist`**
+   - Production branch: 公開したいブランチ（例: `claude/practical-wozniak-HmGKq` または `main`）
+4. **Save and Deploy** → 数分で `https://<プロジェクト名>.pages.dev` が発行される
+
+`vite.config.ts` の `base` は相対パス（`"./"`）なので、ルート配信（pages.dev）でもサブパス配信
+（GitHub Pages の `/test/`）でも、そのまま動作します。
+
 ## 技術スタック
 
 Vite ＋ React ＋ TypeScript ＋ Tailwind CSS ＋ Framer Motion
