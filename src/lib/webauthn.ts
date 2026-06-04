@@ -74,8 +74,10 @@ export interface RegistrationResult {
   rawClientData: string;
 }
 
-export async function registerPasskey(userName: string): Promise<RegistrationResult> {
-  const challenge = randomChallenge(32);
+export async function registerPasskey(
+  userName: string,
+  challenge: Uint8Array = randomChallenge(32),
+): Promise<RegistrationResult> {
   const userId = randomChallenge(16);
 
   const publicKey: PublicKeyCredentialCreationOptions = {
@@ -151,13 +153,13 @@ export interface AuthenticationResult {
   signatureValid: boolean;
 }
 
-export async function authenticatePasskey(): Promise<AuthenticationResult> {
+export async function authenticatePasskey(
+  challenge: Uint8Array = randomChallenge(32),
+): Promise<AuthenticationResult> {
   const stored = loadCredentials();
   if (stored.length === 0) {
     throw new Error("登録済みのパスキーがありません。先に登録してください。");
   }
-
-  const challenge = randomChallenge(32);
 
   const publicKey: PublicKeyCredentialRequestOptions = {
     challenge,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   authenticatePasskey,
   clearCredentials,
@@ -10,11 +10,18 @@ import {
   type RegistrationResult,
   type StoredCredential,
 } from "../lib/webauthn";
-import { sleep } from "../lib/utils";
-import { StepFlow, type FlowStep } from "../components/StepFlow";
-import { Actor, Callout, DataField, ResultBadge, SectionHeading } from "../components/ui";
+import { bytesToBase64url, randomChallenge } from "../lib/utils";
+import { StepPlayer, type ActorDef, type PlayerStep } from "../components/StepPlayer";
+import { Callout, DataField, SectionHeading } from "../components/ui";
 
 type Mode = "register" | "authenticate";
+
+const ACTORS: ActorDef[] = [
+  { id: "user", icon: "🧑", name: "ユーザー", sub: "あなた" },
+  { id: "browser", icon: "🌐", name: "ブラウザ", sub: "WebAuthn" },
+  { id: "authenticator", icon: "🔐", name: "認証器", sub: "秘密鍵を保持" },
+  { id: "server", icon: "🗄️", name: "サーバー", sub: "公開鍵を保持" },
+];
 
 export default function PasskeyLab() {
   const [supported, setSupported] = useState(true);
@@ -22,12 +29,14 @@ export default function PasskeyLab() {
   const [creds, setCreds] = useState<StoredCredential[]>([]);
   const [userName, setUserName] = useState("demo-user");
   const [mode, setMode] = useState<Mode>("register");
-  const [step, setStep] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [activeActor, setActiveActor] = useState<string | null>(null);
+
+  // 表示用の状態（各ステップの detail に流し込む）。
+  const [challengeB64, setChallengeB64] = useState("");
   const [reg, setReg] = useState<RegistrationResult | null>(null);
   const [auth, setAuth] = useState<AuthenticationResult | null>(null);
+
+  // 実際の呼び出しで使うチャレンジは ref で保持（表示と一致させる）。
+  const challengeRef = useRef<Uint8Array | null>(null);
 
   useEffect(() => {
     setSupported(isWebAuthnSupported());
@@ -35,241 +44,252 @@ export default function PasskeyLab() {
     setCreds(loadCredentials());
   }, []);
 
-  function refresh() {
-    setCreds(loadCredentials());
-  }
-
-  async function doRegister() {
-    setBusy(true);
-    setError(null);
+  function switchMode(next: Mode) {
+    if (next === mode) return;
+    challengeRef.current = null;
+    setChallengeB64("");
     setReg(null);
-    setMode("register");
-    setStep(0);
-    try {
-      setActiveActor("browser");
-      await sleep(700);
-      setStep(1);
-      setActiveActor("authenticator"); // ここで指紋/顔/PIN のOSダイアログが出る
-      const result = await registerPasskey(userName.trim() || "demo-user");
-      setStep(2);
-      setActiveActor("browser");
-      await sleep(700);
-      setStep(3);
-      setActiveActor("server");
-      await sleep(700);
-      setStep(4);
-      setReg(result);
-      refresh();
-    } catch (e) {
-      setError(humanizeError(e));
-    } finally {
-      setActiveActor(null);
-      setBusy(false);
-    }
-  }
-
-  async function doAuthenticate() {
-    setBusy(true);
-    setError(null);
     setAuth(null);
-    setMode("authenticate");
-    setStep(0);
-    try {
-      setActiveActor("server");
-      await sleep(700);
-      setStep(1);
-      setActiveActor("authenticator");
-      const result = await authenticatePasskey();
-      setStep(2);
-      setActiveActor("browser");
-      await sleep(700);
-      setStep(3);
-      setActiveActor("server");
-      await sleep(700);
-      setStep(4);
-      setAuth(result);
-      refresh();
-    } catch (e) {
-      setError(humanizeError(e));
-    } finally {
-      setActiveActor(null);
-      setBusy(false);
-    }
+    setMode(next);
   }
 
-  const registerSteps: FlowStep[] = [
+  function resetState() {
+    challengeRef.current = null;
+    setChallengeB64("");
+    if (mode === "register") setReg(null);
+    else setAuth(null);
+  }
+
+  // --- 登録フロー ---
+  const registerSteps: PlayerStep[] = [
     {
-      id: "r0",
-      actor: "サーバー",
-      title: "チャレンジ＋ユーザー情報を発行",
-      description: "サーバーが乱数（チャレンジ）と登録用パラメータを返す。",
-      detail: reg ? <DataField tone="sky" label="challenge (b64url)" value={reg.challenge} /> : null,
+      actor: "server",
+      from: "server",
+      to: "browser",
+      arrowLabel: "challenge",
+      title: "サーバーがチャレンジを発行",
+      description:
+        "サーバーが使い捨ての乱数（チャレンジ）と登録パラメータを返します。毎回違う値なので使い回しできません。",
+      detail: challengeB64 ? (
+        <DataField tone="sky" label="challenge (b64url)" value={challengeB64} />
+      ) : null,
     },
     {
-      id: "r1",
-      actor: "認証器",
+      actor: "browser",
+      from: "browser",
+      to: "authenticator",
+      arrowLabel: "create() 依頼",
+      title: "ブラウザが認証器に鍵生成を依頼",
+      description:
+        "navigator.credentials.create() を準備。このサイト(rpId)向けに、対応アルゴリズムで鍵ペアを作るよう認証器へ依頼します。",
+      detail: (
+        <DataField
+          tone="slate"
+          label="rpId / alg"
+          value={`${location.hostname} / ES256(-7), RS256(-257)`}
+        />
+      ),
+    },
+    {
+      actor: "authenticator",
+      live: true,
       title: "本人確認 → 鍵ペアを生成",
       description:
-        "OSの生体認証（指紋/顔）やPINで本人確認。認証器がこのサイト専用の鍵ペアを作る。秘密鍵は端末から出ない。",
+        "端末の生体認証（指紋/顔）やPINで本人確認し、認証器がこのサイト専用の鍵ペアを生成します。秘密鍵は認証器の中に留まり、外には出ません。",
       detail: reg ? (
         <DataField tone="violet" label="生成された資格情報ID" value={reg.credential.credentialId} />
       ) : null,
     },
     {
-      id: "r2",
-      actor: "ブラウザ",
-      title: "公開鍵などをサーバーへ返す",
-      description: "認証器が返した公開鍵・資格情報IDをブラウザがサーバーへ転送する。",
+      actor: "browser",
+      from: "authenticator",
+      to: "server",
+      arrowLabel: "公開鍵",
+      title: "公開鍵をサーバーへ送る",
+      description:
+        "認証器が返した『公開鍵』と資格情報IDを、ブラウザがサーバーへ転送します。送られるのは公開鍵だけ。",
       detail: reg ? (
         <DataField tone="emerald" label="公開鍵 (SPKI, b64url)" value={reg.credential.publicKeySpki} />
       ) : null,
     },
     {
-      id: "r3",
-      actor: "サーバー",
-      title: "公開鍵を保存（パスワードは保存しない）",
+      actor: "server",
+      title: "公開鍵を保存して登録完了",
       description:
-        "サーバーは公開鍵を保管するだけ。秘密情報を持たないので、漏洩してもなりすましに使えない。",
+        "サーバーは公開鍵を保管するだけ。パスワードのような秘密を持たないので、漏洩してもなりすましに使えません。登録完了です！",
       detail: reg ? (
         <DataField tone="sky" label="アルゴリズム" value={algName(reg.credential.algorithm)} />
       ) : null,
     },
-    {
-      id: "r4",
-      actor: "完了",
-      title: "登録完了",
-      description: "以後はこの公開鍵で本人確認できる。パスワードは一切不要。",
-    },
   ];
 
-  const authSteps: FlowStep[] = [
+  async function activateRegister(i: number) {
+    if (i === 0) {
+      const c = randomChallenge(32);
+      challengeRef.current = c;
+      setChallengeB64(bytesToBase64url(c));
+    }
+    if (i === 2) {
+      const result = await registerPasskey(
+        userName.trim() || "demo-user",
+        challengeRef.current ?? randomChallenge(32),
+      );
+      setReg(result);
+      setCreds(loadCredentials());
+    }
+  }
+
+  // --- 認証フロー ---
+  const authSteps: PlayerStep[] = [
     {
-      id: "a0",
-      actor: "サーバー",
-      title: "チャレンジを発行",
-      description: "ログインのたびに新しい乱数を発行（リプレイ攻撃対策）。",
-      detail: auth ? <DataField tone="sky" label="challenge (b64url)" value={auth.challenge} /> : null,
+      actor: "server",
+      from: "server",
+      to: "browser",
+      arrowLabel: "challenge",
+      title: "サーバーがチャレンジを発行",
+      description:
+        "ログインのたびに新しい乱数（チャレンジ）を発行します。これにより署名の使い回し（リプレイ攻撃）を防ぎます。",
+      detail: challengeB64 ? (
+        <DataField tone="sky" label="challenge (b64url)" value={challengeB64} />
+      ) : null,
     },
     {
-      id: "a1",
-      actor: "認証器",
+      actor: "browser",
+      from: "browser",
+      to: "authenticator",
+      arrowLabel: "get() 依頼",
+      title: "ブラウザが認証器に署名を依頼",
+      description:
+        "navigator.credentials.get() を準備。登録済みの資格情報IDを指定し、チャレンジへの署名を認証器へ依頼します。",
+      detail: (
+        <DataField tone="slate" label="rpId" value={`${location.hostname}（登録済みの鍵を使用）`} />
+      ),
+    },
+    {
+      actor: "authenticator",
+      live: true,
       title: "本人確認 → 秘密鍵で署名",
       description:
-        "生体認証/PINで本人確認し、秘密鍵でチャレンジに署名する。秘密鍵は出ず、署名だけが出力される。",
+        "生体認証/PINで本人確認し、秘密鍵でチャレンジに署名します。秘密鍵は外に出ず、出力されるのは『署名』だけです。",
       detail: auth ? (
-        <DataField tone="violet" label="署名 (hex)" value={`${auth.signatureHex.slice(0, 48)}…`} />
+        <DataField tone="violet" label="署名 (hex)" value={`${auth.signatureHex.slice(0, 64)}…`} />
       ) : null,
     },
     {
-      id: "a2",
-      actor: "ブラウザ",
-      title: "署名・認証データを返す",
-      description: "authenticatorData と clientDataJSON、署名をサーバーへ送る。",
-      detail: auth ? (
-        <DataField tone="slate" label="authenticatorData (hex)" value={`${auth.authenticatorDataHex.slice(0, 48)}…`} />
-      ) : null,
-    },
-    {
-      id: "a3",
-      actor: "サーバー",
-      title: "保存済み公開鍵で署名を検証",
+      actor: "browser",
+      from: "authenticator",
+      to: "server",
+      arrowLabel: "署名",
+      title: "署名をサーバーへ送る",
       description:
-        "登録時に預かった公開鍵で署名を検証（このデモではブラウザ内のWeb Cryptoで実際に検証）。",
+        "署名・authenticatorData・clientDataJSON をサーバーへ送ります。秘密鍵は送りません。",
+      detail: auth ? (
+        <DataField
+          tone="slate"
+          label="authenticatorData (hex)"
+          value={`${auth.authenticatorDataHex.slice(0, 64)}…`}
+        />
+      ) : null,
+    },
+    {
+      actor: "server",
+      title: "公開鍵で署名を検証 → ログイン成立",
+      description:
+        "サーバーは登録時に預かった公開鍵で署名を検証します（このデモではブラウザ内のWeb Cryptoで実際に検証）。正しければ本人と確認でき、ログイン成立です。",
       detail:
         auth != null ? (
-          <DataField tone={auth.signatureValid ? "emerald" : "rose"} label="署名検証" value={auth.signatureValid ? "✓ 有効" : "✕ 無効"} />
+          <DataField
+            tone={auth.signatureValid ? "emerald" : "rose"}
+            label="署名検証"
+            value={auth.signatureValid ? "✓ 有効：本人と確認" : "✕ 無効"}
+          />
         ) : null,
-    },
-    {
-      id: "a4",
-      actor: "完了",
-      title: "ログイン成立",
-      description: "署名が正しければログイン成功。パスワードのやり取りは一切なし。",
     },
   ];
 
-  const steps = mode === "register" ? registerSteps : authSteps;
+  async function activateAuthenticate(i: number) {
+    if (i === 0) {
+      const c = randomChallenge(32);
+      challengeRef.current = c;
+      setChallengeB64(bytesToBase64url(c));
+    }
+    if (i === 2) {
+      const result = await authenticatePasskey(challengeRef.current ?? randomChallenge(32));
+      setAuth(result);
+      setCreds(loadCredentials());
+    }
+  }
 
   return (
     <div className="space-y-6">
-      <SectionHeading eyebrow="実機で体験 / WebAuthn" title="パスキーを実際に動かす">
-        ここまでの「署名と検証」を、ブラウザ標準の <b className="text-slate-200">WebAuthn API</b> と
-        お使いの端末の認証器（Touch ID / Face ID / Windows Hello / セキュリティキー）で本物として動かします。
+      <SectionHeading eyebrow="実機で体験 / WebAuthn" title="パスキーを1ステップずつ動かす">
+        「次へ」を押して、サーバー⇄ブラウザ⇄認証器のやり取りを自分のペースで進めましょう。
+        <b className="text-slate-200">「認証器」のステップで実際の生体認証</b>が起動します。
       </SectionHeading>
 
       {!supported && (
         <Callout variant="warn" title="この環境では WebAuthn を利用できません">
-          HTTPS もしくは localhost で、対応ブラウザを使うと動作します。上の2つの「公開鍵暗号」デモは利用できます。
+          HTTPS もしくは localhost の対応ブラウザでお試しください。
         </Callout>
       )}
       {supported && platformAvailable === false && (
         <Callout variant="info" title="内蔵認証器が見つかりません">
-          指紋/顔認証が使えない端末の可能性があります。外付けセキュリティキーやスマホ連携（QR）でも試せます。
+          外付けセキュリティキーやスマホ連携（QR）でも試せます。
         </Callout>
       )}
 
-      <div className="card p-5">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div className="flex-1">
-            <label className="mb-2 block text-sm font-medium text-slate-300">ユーザー名</label>
+      {/* モード切替＋ユーザー名 */}
+      <div className="card p-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="inline-flex rounded-xl border border-white/10 bg-black/20 p-1">
+            <button
+              onClick={() => switchMode("register")}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                mode === "register" ? "bg-sky-500/20 text-white" : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              ① 登録フロー
+            </button>
+            <button
+              onClick={() => switchMode("authenticate")}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${
+                mode === "authenticate"
+                  ? "bg-sky-500/20 text-white"
+                  : "text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              ② 認証フロー
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-slate-400">ユーザー名</label>
             <input
               value={userName}
               onChange={(e) => setUserName(e.target.value)}
-              disabled={busy}
-              className="w-full rounded-xl border border-white/10 bg-black/30 px-4 py-2.5 text-sm text-slate-100 outline-none focus:border-sky-400/50 sm:max-w-xs"
+              className="w-40 rounded-lg border border-white/10 bg-black/30 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-sky-400/50"
             />
           </div>
-          <div className="flex gap-3">
-            <button onClick={doRegister} disabled={busy || !supported} className="btn-primary">
-              {busy && mode === "register" ? "実行中…" : "① パスキーを登録"}
-            </button>
-            <button
-              onClick={doAuthenticate}
-              disabled={busy || !supported || creds.length === 0}
-              className="btn-ghost"
-            >
-              {busy && mode === "authenticate" ? "実行中…" : "② パスキーでログイン"}
-            </button>
-          </div>
         </div>
-
-        {/* 4者のやり取りを可視化 */}
-        <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <Actor icon="🧑" name="ユーザー" sub="生体認証" active={activeActor === "authenticator"} />
-          <Actor icon="🌐" name="ブラウザ" sub="WebAuthn API" active={activeActor === "browser"} />
-          <Actor icon="🔐" name="認証器" sub="秘密鍵を保持" active={activeActor === "authenticator"} />
-          <Actor icon="🗄️" name="サーバー" sub="公開鍵を保持" active={activeActor === "server"} />
-        </div>
-
-        {error && (
-          <div className="mt-4 rounded-xl bg-rose-500/10 px-4 py-3 text-sm text-rose-300 ring-1 ring-rose-400/30">
-            {error}
-          </div>
-        )}
       </div>
 
-      <div className="card p-5">
-        <div className="mb-3 text-sm font-semibold text-slate-200">
-          {mode === "register" ? "登録フロー（Registration）" : "認証フロー（Authentication）"}
+      {mode === "authenticate" && creds.length === 0 ? (
+        <Callout variant="warn" title="先にパスキーを登録してください">
+          認証（ログイン）には登録済みのパスキーが必要です。「① 登録フロー」から作成してください。
+        </Callout>
+      ) : (
+        <div className="card p-5">
+          <StepPlayer
+            key={mode}
+            steps={mode === "register" ? registerSteps : authSteps}
+            actors={ACTORS}
+            onActivate={mode === "register" ? activateRegister : activateAuthenticate}
+            onReset={resetState}
+            formatError={humanizeError}
+          />
         </div>
-        <StepFlow steps={steps} current={step} />
-        {mode === "authenticate" && auth != null && (
-          <div className="mt-5">
-            <ResultBadge ok={auth.signatureValid}>
-              {auth.signatureValid
-                ? "署名検証OK：パスキーでログイン成功！"
-                : "署名検証NG：ログイン失敗"}
-            </ResultBadge>
-          </div>
-        )}
-        {mode === "register" && reg != null && (
-          <div className="mt-5">
-            <ResultBadge ok>パスキー登録完了：公開鍵をサーバーに保存しました</ResultBadge>
-          </div>
-        )}
-      </div>
+      )}
 
-      {/* 登録済みパスキー一覧（サーバー側DBの代役） */}
+      {/* 登録済みパスキー一覧 */}
       <div className="card p-5">
         <div className="mb-3 flex items-center justify-between">
           <div className="text-sm font-semibold text-slate-200">
@@ -279,7 +299,7 @@ export default function PasskeyLab() {
             <button
               onClick={() => {
                 clearCredentials();
-                refresh();
+                setCreds(loadCredentials());
               }}
               className="text-xs text-rose-300 hover:underline"
             >
@@ -288,7 +308,7 @@ export default function PasskeyLab() {
           )}
         </div>
         {creds.length === 0 ? (
-          <p className="text-sm text-slate-500">まだありません。「① パスキーを登録」から作成してください。</p>
+          <p className="text-sm text-slate-500">まだありません。「① 登録フロー」から作成してください。</p>
         ) : (
           <ul className="space-y-2">
             {creds.map((c) => (
@@ -325,7 +345,7 @@ function humanizeError(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
   if (e instanceof DOMException) {
     if (e.name === "NotAllowedError")
-      return "操作がキャンセルされたか、タイムアウトしました。もう一度お試しください。";
+      return "操作がキャンセルされたか、タイムアウトしました。「もう一度」でやり直せます。";
     if (e.name === "InvalidStateError")
       return "この認証器には既に登録済みの可能性があります。";
     if (e.name === "SecurityError")
