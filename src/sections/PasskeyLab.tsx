@@ -6,6 +6,7 @@ import {
   isWebAuthnSupported,
   loadCredentials,
   registerPasskey,
+  type AttachmentChoice,
   type AuthenticationResult,
   type RegistrationResult,
   type StoredCredential,
@@ -29,6 +30,8 @@ export default function PasskeyLab() {
   const [creds, setCreds] = useState<StoredCredential[]>([]);
   const [userName, setUserName] = useState("demo-user");
   const [mode, setMode] = useState<Mode>("register");
+  // 登録先の認証器: platform=このデバイス内蔵 / cross-platform=スマホ・別デバイス(QR)
+  const [attachment, setAttachment] = useState<AttachmentChoice>("platform");
 
   // 表示用の状態（各ステップの detail に流し込む）。
   const [challengeB64, setChallengeB64] = useState("");
@@ -51,6 +54,14 @@ export default function PasskeyLab() {
     setReg(null);
     setAuth(null);
     setMode(next);
+  }
+
+  function switchAttachment(next: AttachmentChoice) {
+    if (next === attachment) return;
+    challengeRef.current = null;
+    setChallengeB64("");
+    setReg(null);
+    setAttachment(next);
   }
 
   function resetState() {
@@ -93,9 +104,14 @@ export default function PasskeyLab() {
     {
       actor: "authenticator",
       live: true,
-      title: "本人確認 → 鍵ペアを生成",
+      title:
+        attachment === "cross-platform"
+          ? "QR表示 → スマホで本人確認 → 鍵ペアを生成"
+          : "本人確認 → 鍵ペアを生成",
       description:
-        "端末の生体認証（指紋/顔）やPINで本人確認し、認証器がこのサイト専用の鍵ペアを生成します。秘密鍵は認証器の中に留まり、外には出ません。",
+        attachment === "cross-platform"
+          ? "ブラウザが「別のデバイスを使う」QRコードを表示します。スマホの標準カメラで読み取り、スマホ側で指紋/顔認証すると、スマホの中に鍵ペアが作られます。秘密鍵はスマホから出ません。"
+          : "端末の生体認証（指紋/顔）やPINで本人確認し、認証器がこのサイト専用の鍵ペアを生成します。秘密鍵は認証器の中に留まり、外には出ません。",
       detail: reg ? (
         <DataField tone="violet" label="生成された資格情報ID" value={reg.credential.credentialId} />
       ) : null,
@@ -133,6 +149,7 @@ export default function PasskeyLab() {
       const result = await registerPasskey(
         userName.trim() || "demo-user",
         challengeRef.current ?? randomChallenge(32),
+        attachment,
       );
       setReg(result);
       setCreds(loadCredentials());
@@ -270,7 +287,38 @@ export default function PasskeyLab() {
             />
           </div>
         </div>
+
+        {/* 登録先の認証器を選ぶ（登録フローのみ） */}
+        {mode === "register" && (
+          <div className="mt-4 border-t border-white/5 pt-4">
+            <div className="mb-2 text-xs font-semibold text-slate-300">パスキーをどこに作る？</div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <DeviceChoiceButton
+                active={attachment === "platform"}
+                onClick={() => switchAttachment("platform")}
+                icon="💻"
+                title="このデバイス"
+                sub="内蔵の指紋 / 顔 / Windows Hello"
+              />
+              <DeviceChoiceButton
+                active={attachment === "cross-platform"}
+                onClick={() => switchAttachment("cross-platform")}
+                icon="📱"
+                title="スマホ / 別デバイス"
+                sub="QRコードを読み取って移行"
+              />
+            </div>
+          </div>
+        )}
       </div>
+
+      {mode === "register" && attachment === "cross-platform" && (
+        <Callout variant="info" title="QRコードはブラウザが表示します">
+          「次へ」で<b>認証器のステップ</b>まで進むと、ブラウザが「別のデバイスを使う」QRコードを表示します。
+          スマホの<b>標準カメラ</b>で読み取り、スマホ側で指紋／顔認証してください
+          （※ Webアプリ側ではQRを生成できない仕様です）。
+        </Callout>
+      )}
 
       {mode === "authenticate" && creds.length === 0 ? (
         <Callout variant="warn" title="先にパスキーを登録してください">
@@ -279,7 +327,7 @@ export default function PasskeyLab() {
       ) : (
         <div className="card p-5">
           <StepPlayer
-            key={mode}
+            key={`${mode}-${attachment}`}
             steps={mode === "register" ? registerSteps : authSteps}
             actors={ACTORS}
             onActivate={mode === "register" ? activateRegister : activateAuthenticate}
@@ -318,7 +366,9 @@ export default function PasskeyLab() {
                   <span className="text-slate-400">{algName(c.algorithm)}</span>
                   {c.authenticatorAttachment && (
                     <span className="text-slate-500">
-                      {c.authenticatorAttachment === "platform" ? "🖥 内蔵認証器" : "🔑 外付け"}
+                      {c.authenticatorAttachment === "platform"
+                        ? "💻 このデバイス"
+                        : "📱 スマホ / 別デバイス"}
                     </span>
                   )}
                   <span className="text-slate-600">
@@ -332,6 +382,38 @@ export default function PasskeyLab() {
         )}
       </div>
     </div>
+  );
+}
+
+function DeviceChoiceButton({
+  active,
+  onClick,
+  icon,
+  title,
+  sub,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: string;
+  title: string;
+  sub: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition ${
+        active
+          ? "border-sky-400/60 bg-sky-400/10 shadow-lg shadow-sky-500/10"
+          : "border-white/10 bg-white/[0.02] hover:bg-white/[0.05]"
+      }`}
+    >
+      <span className="text-2xl">{icon}</span>
+      <span className="flex flex-col">
+        <span className="text-sm font-semibold text-slate-100">{title}</span>
+        <span className="text-[11px] text-slate-400">{sub}</span>
+      </span>
+      <span className={`ml-auto text-sm ${active ? "text-sky-300" : "text-transparent"}`}>✓</span>
+    </button>
   );
 }
 

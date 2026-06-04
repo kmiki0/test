@@ -74,11 +74,25 @@ export interface RegistrationResult {
   rawClientData: string;
 }
 
+/** 認証器の置き場所。platform=このデバイス内蔵、cross-platform=スマホ/別デバイス(QR)。 */
+export type AttachmentChoice = "platform" | "cross-platform" | "any";
+
 export async function registerPasskey(
   userName: string,
   challenge: Uint8Array = randomChallenge(32),
+  attachment: AttachmentChoice = "any",
 ): Promise<RegistrationResult> {
   const userId = randomChallenge(16);
+
+  const authenticatorSelection: AuthenticatorSelectionCriteria = {
+    residentKey: "preferred",
+    userVerification: "preferred",
+  };
+  // cross-platform を指定すると、ブラウザが「別のデバイスを使う」QRフロー
+  // （FIDO hybrid transport）を提示する。platform を指定すると内蔵認証器のみ。
+  if (attachment !== "any") {
+    authenticatorSelection.authenticatorAttachment = attachment;
+  }
 
   const publicKey: PublicKeyCredentialCreationOptions = {
     challenge,
@@ -92,11 +106,8 @@ export async function registerPasskey(
       { type: "public-key", alg: -7 }, // ES256 (ECDSA P-256) ← 最も一般的
       { type: "public-key", alg: -257 }, // RS256 (RSA) ← フォールバック
     ],
-    authenticatorSelection: {
-      residentKey: "preferred",
-      userVerification: "preferred",
-    },
-    timeout: 60000,
+    authenticatorSelection,
+    timeout: 120000,
     attestation: "none",
   };
 
@@ -164,11 +175,16 @@ export async function authenticatePasskey(
   const publicKey: PublicKeyCredentialRequestOptions = {
     challenge,
     rpId: location.hostname,
-    timeout: 60000,
+    timeout: 120000,
     userVerification: "preferred",
     allowCredentials: stored.map((c) => ({
       type: "public-key" as const,
       id: base64urlToBytes(c.credentialId),
+      // 登録時に保存した transports を渡すと、ブラウザがスマホ(hybrid)等の
+      // 正しい経路を提示できる。空なら省略。
+      ...(c.transports.length
+        ? { transports: c.transports as AuthenticatorTransport[] }
+        : {}),
     })),
   };
 
