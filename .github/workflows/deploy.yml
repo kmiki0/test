@@ -1,10 +1,15 @@
 name: Deploy to GitHub Pages
 
 # GitHub Pages 用のデプロイ。
-# ※ このリポジトリは Private のため無料プランでは Pages を公開できない。
-#    通常は Cloudflare Pages を使うため、本ワークフローは手動実行のみにしている。
-#    Public 化して GitHub Pages を使う場合は push トリガーを復活させる。
+# main または開発ブランチへの push で自動ビルド＆公開する。
+# 手動実行（Actions タブの Run workflow）も可能。
+# ※ Pages を使うにはリポジトリが Public（無料プランの場合）かつ
+#    Settings → Pages → Source: GitHub Actions である必要がある。
 on:
+  push:
+    branches:
+      - main
+      - claude/practical-wozniak-HmGKq
   workflow_dispatch:
 
 # GitHub Pages へのデプロイに必要な権限。
